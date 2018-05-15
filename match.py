@@ -162,8 +162,5 @@ def weighted_match(ra_data,dec_data,flux_data,ra_err,dec_err,flux_err,
         Y[:,2:] = flux_data
         Y_err[:,2:] = flux_err
     tree = BallTree(X,metric='pyfunc',func=weighted_distance,metric_params={'weights': Y_err})
-    Y = np.zeros((len(ra_data),2))
-    Y[:,0] = ra_data
-    Y[:,1] = dec_data
     dist, ind = tree.query(Y)
     return dist.flatten(), true_id[ind.flatten()], np.ones(len(ind))
