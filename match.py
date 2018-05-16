@@ -1,11 +1,6 @@
 import numpy as np
-from sklearn.neighbors import KDTree, BallTree
-
-def weighted_distance(x,y,**kwargs):
-    """
-    Auxiliary function to define a chi-square-like metric
-    """
-    return np.sum((x-y)**2/kwargs['metric_params']['weights']**2)
+from sklearn.neighbors import KDTree
+from scipy.stats import chi2
 
 def spatial_closest(ra_data,dec_data,
                     ra_true,dec_true,true_id):
@@ -38,14 +33,14 @@ def spatial_closest(ra_data,dec_data,
     X = np.zeros((len(ra_true),2))
     X[:,0] = ra_true
     X[:,1] = dec_true
-    tree = KDTree(X)
+    tree = KDTree(X, metric='euclidean')
     Y = np.zeros((len(ra_data),2))
     Y[:,0] = ra_data
     Y[:,1] = dec_data
     dist, ind = tree.query(Y)
     return dist.flatten()*3600., true_id[ind.flatten()], np.ones(len(ind),dtype=bool)
 
-def spatial_closest_mag(ra_data,dec_data,mag_data,
+def spatial_closest_mag_1band(ra_data,dec_data,mag_data,
                               ra_true,dec_true,mag_true,true_id,
                               rmax=3,max_deltamag=1.):
     """
@@ -61,10 +56,10 @@ def spatial_closest_mag(ra_data,dec_data,mag_data,
     
     ra_data: Right ascension of the measured objects (degrees).
     dec_data: Declination of the measured objects (degrees).
-    mag_data: Measured magnitude of the objects (assumed 1 band only).
+    mag_data: Measured magnitude of the objects.
     ra_true: Right ascension of the true catalog (degrees).
     dec_true: Declination of the true catalog (degrees).
-    mag_true: True magnitude of the true catalog (assumed 1 band only).
+    mag_true: True magnitude of the true catalog.
     true_id: Array of IDs in the true catalog.
     rmax: Maximum distance in number of pixels to perform the query.
     max_deltamag: Maximum magnitude difference for the match to be good.
@@ -80,21 +75,20 @@ def spatial_closest_mag(ra_data,dec_data,mag_data,
     X = np.zeros((len(ra_true),2))
     X[:,0] = ra_true
     X[:,1] = dec_true
-    tree = KDTree(X)
+    tree = KDTree(X,metric='euclidean')
     Y = np.zeros((len(ra_data),2))
     Y[:,0] = ra_data
     Y[:,1] = dec_data
-    ind, dist = tree.query_radius(Y,r=rmax*0.2/3600,return_distance=True)
+    ind,dist= tree.query_radius(Y,r=rmax*0.2/3600,return_distance=True)
     matched = np.zeros(len(ind),dtype=bool)
     ids = np.zeros(len(ind),dtype=long)
     dist_out = np.zeros(len(ind))
-    print(ind)
     for i, ilist in enumerate(ind):
         if len(ilist)>0:
             dmag = np.fabs(mag_true[ilist]-mag_data[i])
             good_ind = np.argmin(dmag)
             ids[i]=true_id[ilist[good_ind]]
-            dist_out[i]=dist[i][good_ind]*3600.
+            dist_out[i]=dist[i][good_ind]
             if np.min(dmag)<max_deltamag:
                 matched[i]=True
             else:
@@ -103,14 +97,16 @@ def spatial_closest_mag(ra_data,dec_data,mag_data,
             ids[i]=-99
             matched[i]=False
             dist_out[i]=-99.
-    return dist_out, ids,matched
+    return dist_out*3600., ids,matched
+
 
 def weighted_match(ra_data,dec_data,flux_data,ra_err,dec_err,flux_err,
-                   ra_true,dec_true,flux_true,true_id):
+                   ra_true,dec_true,flux_true,true_id,npix=10,min_prob=0.05,use_dist='angular'):
     """
     Function to return the closest match using positions, fluxes and errors
-    using a BallTree with a chi-square-like metric ignoring correlations between position
-    and flux.
+    using a KDTree. First it queries in a circle of radius npix, then it computes
+    the chi-square for all objects in that circle and returns the one with the minimum
+    total_chi-square.
     
     ***Caveats***: This method uses small angle approximation sin(theta)
     ~ theta for the declination axis. This should be fine to find the closest
@@ -131,7 +127,11 @@ def weighted_match(ra_data,dec_data,flux_data,ra_err,dec_err,flux_err,
     flux_true: Fluxes of the true catalog (same units as as flux_data).
     Shape (N_true_entries,num_bands)
     true_id: Array of IDs in the true catalog.
-    
+    npix: Number of pixels in which to do the query
+    min_prob: Minimum value of the returned chi-square probability for
+    a source to claim that it has been matched.
+    use_dist: If angular returns angular distance, if chi2 it returns the distance in
+    terms of the chi square.
     Returns:
     --------
     
@@ -161,6 +161,26 @@ def weighted_match(ra_data,dec_data,flux_data,ra_err,dec_err,flux_err,
         X[:,2:] = flux_true
         Y[:,2:] = flux_data
         Y_err[:,2:] = flux_err
-    tree = BallTree(X,metric='pyfunc',func=weighted_distance,metric_params={'weights': Y_err})
-    dist, ind = tree.query(Y)
-    return dist.flatten(), true_id[ind.flatten()], np.ones(len(ind))
+    tree = KDTree(X[:,:2],metric='euclidean')
+    ind, dist = tree.query_radius(Y[:,:2],r=npix*0.2/3600.,return_distance=True)
+    ids = np.zeros(len(ind),dtype=true_id.dtype)
+    dist_out = np.zeros(len(ind))
+    matched =np.zeros(len(ind),dtype=bool)
+    for i, ilist in enumerate(ind):
+        if len(ilist)>0:
+            total_chisq = np.sum((X[ilist,:]-Y[i,:])**2/Y_err[i,:]**2,axis=1)
+            good_ind = np.argmin(total_chisq)
+            ids[i]=true_id[ilist[good_ind]]
+            if use_dist=='angular':
+                dist_out[i]=dist[i][good_ind]*3600.
+            if use_dist=='chi2':
+                dist_out[i]=np.min(total_chisq)
+            if 1-chi2.cdf(np.min(total_chisq),X.shape[1]-1)>min_prob:
+                matched[i]=True
+            else:
+                matched[i]=False
+        else:
+            ids[i]=-99
+            matched[i]=False
+            dist_out[i]=-99.
+    return dist_out, ids, matched
