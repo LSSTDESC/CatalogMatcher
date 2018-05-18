@@ -21,6 +21,7 @@ def spatial_closest(ra_data,dec_data,
     ra_true: Right ascension of the true catalog (degrees preferred).
     dec_true: Declination of the true catalog (degrees preferred).
     true_id: List of IDs of objects in the true catalog
+
     Returns:
     --------
     
@@ -42,7 +43,7 @@ def spatial_closest(ra_data,dec_data,
 
 def spatial_closest_mag_1band(ra_data,dec_data,mag_data,
                               ra_true,dec_true,mag_true,true_id,
-                              rmax=3,max_deltamag=1.):
+                              npix=4,max_deltamag=1.):
     """
     Function to return the closest match in magnitude within a user-defined radius within certain
     magnitude difference.
@@ -61,7 +62,7 @@ def spatial_closest_mag_1band(ra_data,dec_data,mag_data,
     dec_true: Declination of the true catalog (degrees).
     mag_true: True magnitude of the true catalog.
     true_id: Array of IDs in the true catalog.
-    rmax: Maximum distance in number of pixels to perform the query.
+    npix: Maximum distance in number of pixels to perform the query.
     max_deltamag: Maximum magnitude difference for the match to be good.
     
     Returns:
@@ -79,7 +80,7 @@ def spatial_closest_mag_1band(ra_data,dec_data,mag_data,
     Y = np.zeros((len(ra_data),2))
     Y[:,0] = ra_data
     Y[:,1] = dec_data
-    ind,dist= tree.query_radius(Y,r=rmax*0.2/3600,return_distance=True)
+    ind,dist= tree.query_radius(Y,r=npix*0.2/3600,return_distance=True)
     matched = np.zeros(len(ind),dtype=bool)
     ids = np.zeros(len(ind),dtype=long)
     dist_out = np.zeros(len(ind))
@@ -101,7 +102,7 @@ def spatial_closest_mag_1band(ra_data,dec_data,mag_data,
 
 
 def weighted_match(ra_data,dec_data,flux_data,ra_err,dec_err,flux_err,
-                   ra_true,dec_true,flux_true,true_id,npix=10,min_prob=0.05,use_dist='angular'):
+                   ra_true,dec_true,flux_true,true_id,npix=4,min_prob=0.01,use_dist='angular'):
     """
     Function to return the closest match using positions, fluxes and errors
     using a KDTree. First it queries in a circle of radius npix, then it computes
@@ -134,12 +135,15 @@ def weighted_match(ra_data,dec_data,flux_data,ra_err,dec_err,flux_err,
     terms of the chi square.
     Returns:
     --------
-    
-    dist: Distance in the N-dimensional space to the closest neighbor in the true catalog
-    with N=num_bands+2.
+   
+    dist_ang: Angular distance to match in arcseconds.
+    dist_chi: Distance in the N-dimensional space weighted by the error in each dimension
+    to the closest neighbor in the true catalog with N=num_bands+2.
     true_id: ID in the true catalog for the closest match.
     matched: True if matched, False if not matched.
+    nmatches: Number of sources that would be a good match in terms of chi-square probability.
     """ 
+
     if len(flux_true.shape)==1:
         nbands=1
     else:
@@ -164,23 +168,24 @@ def weighted_match(ra_data,dec_data,flux_data,ra_err,dec_err,flux_err,
     tree = KDTree(X[:,:2],metric='euclidean')
     ind, dist = tree.query_radius(Y[:,:2],r=npix*0.2/3600.,return_distance=True)
     ids = np.zeros(len(ind),dtype=true_id.dtype)
-    dist_out = np.zeros(len(ind))
+    dist_chi = np.zeros(len(ind))
+    dist_ang = np.zeros(len(ind))
     matched =np.zeros(len(ind),dtype=bool)
+    nmatches = np.zeros(len(ind),dtype=int)
     for i, ilist in enumerate(ind):
         if len(ilist)>0:
             total_chisq = np.sum((X[ilist,:]-Y[i,:])**2/Y_err[i,:]**2,axis=1)
             good_ind = np.argmin(total_chisq)
-            ids[i]=true_id[ilist[good_ind]]
-            if use_dist=='angular':
-                dist_out[i]=dist[i][good_ind]*3600.
-            if use_dist=='chi2':
-                dist_out[i]=np.min(total_chisq)
+            ids[i] = true_id[ilist[good_ind]]
+            nmatches[i] = np.count_nonzero(total_chisq>min_prob)
+            dist_ang[i] = dist[i][good_ind]*3600.
+            dist_chi[i] = np.min(total_chisq)
             if 1-chi2.cdf(np.min(total_chisq),X.shape[1]-1)>min_prob:
-                matched[i]=True
+                matched[i] = True
             else:
-                matched[i]=False
+                matched[i] = False
         else:
             ids[i]=-99
             matched[i]=False
             dist_out[i]=-99.
-    return dist_out, ids, matched
+    return dist_ang, dist_chi, ids, matched, nmatches
